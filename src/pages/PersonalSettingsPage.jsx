@@ -1,17 +1,52 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { settingsAPI } from '../services/api';
 
-export default function PersonalSettingsPage({ user, onUpdateUser }) {
+export default function PersonalSettingsPage({ user }) {
   const [dailyGoal, setDailyGoal] = useState('5');
   const [dailyFocusMinutes, setDailyFocusMinutes] = useState('180');
   const [gentleReminders, setGentleReminders] = useState(true);
   const [digitalDetoxReminder, setDigitalDetoxReminder] = useState(true);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
-  const handleSave = (e) => {
+  useEffect(() => {
+    settingsAPI
+      .getSettings()
+      .then((res) => {
+        if (res && res.data) {
+          if (res.data.dailyGoal) setDailyGoal(String(res.data.dailyGoal));
+          if (res.data.dailyFocusMinutes) setDailyFocusMinutes(String(res.data.dailyFocusMinutes));
+          if (res.data.gentleReminders !== undefined) setGentleReminders(res.data.gentleReminders);
+          if (res.data.digitalDetoxReminder !== undefined) setDigitalDetoxReminder(res.data.digitalDetoxReminder);
+        }
+      })
+      .catch((err) => {
+        console.warn('Settings fetch offline or demo fallback:', err.message);
+      });
+  }, []);
+
+  const handleSave = async (e) => {
     e.preventDefault();
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 2500);
+    setIsSaving(true);
+    setSavedSuccess(false);
+
+    try {
+      await settingsAPI.updateSettings({
+        dailyGoal: Number(dailyGoal),
+        dailyFocusMinutes: Number(dailyFocusMinutes),
+        gentleReminders,
+        digitalDetoxReminder
+      });
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 2500);
+    } catch (err) {
+      console.warn('Settings save error, falling back to local:', err.message);
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 2500);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -123,9 +158,11 @@ export default function PersonalSettingsPage({ user, onUpdateUser }) {
         <div className="pt-4 border-t border-[#ece2d4] flex justify-end">
           <button
             type="submit"
-            className="px-6 py-2.5 rounded-full bg-[#121b2d] hover:bg-[#1f2d48] text-white text-xs font-semibold tracking-wider transition-all shadow-xs active:scale-95 cursor-pointer"
+            disabled={isSaving}
+            className="px-6 py-2.5 rounded-full bg-[#121b2d] hover:bg-[#1f2d48] text-white text-xs font-semibold tracking-wider transition-all shadow-xs active:scale-95 cursor-pointer flex items-center gap-2"
           >
-            Save Sanctuary Settings
+            {isSaving && <span className="material-symbols-outlined text-sm animate-spin">refresh</span>}
+            <span>Save Sanctuary Settings</span>
           </button>
         </div>
       </form>

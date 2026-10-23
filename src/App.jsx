@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import LandingPage from './components/LandingPage';
 import AppSidebar from './components/AppSidebar';
@@ -7,6 +7,23 @@ import TaskManagerPage from './pages/TaskManagerPage';
 import PersonalSettingsPage from './pages/PersonalSettingsPage';
 import AuthModal from './components/AuthModal';
 import { INITIAL_PERSONAL_TASKS, INITIAL_WEEKLY_STATS } from './data/personalData';
+import { authAPI, tasksAPI, analyticsAPI } from './services/api';
+
+// Helper to normalize task items from either API or local state
+const normalizeTask = (t) => ({
+  id: t._id || t.id,
+  _id: t._id || t.id,
+  title: t.title,
+  category: t.category,
+  priority: t.priority,
+  stage: t.stage || (t.completed ? 'done' : 'doing'),
+  completed: Boolean(t.completed),
+  dueDate: t.dueDate || 'Today',
+  estimatedMinutes: Number(t.estimatedMinutes) || 30,
+  startTime: t.startTime || null,
+  endTime: t.endTime || null,
+  notes: t.notes || ''
+});
 
 export default function App() {
   const [currentView, setCurrentView] = useState('landing'); // 'landing' | 'app'
@@ -21,8 +38,60 @@ export default function App() {
   const [authModalMode, setAuthModalMode] = useState('login');
   const [isMobileOpen, setIsMobileOpen] = useState(false);
 
-  const [tasks, setTasks] = useState(INITIAL_PERSONAL_TASKS);
+  const [tasks, setTasks] = useState(INITIAL_PERSONAL_TASKS.map(normalizeTask));
   const [weeklyStats, setWeeklyStats] = useState(INITIAL_WEEKLY_STATS);
+
+  // Load live tasks from backend
+  const loadTasksFromAPI = useCallback(async () => {
+    try {
+      const res = await tasksAPI.getTasks({ limit: 100 });
+      if (res && res.data && res.data.tasks && res.data.tasks.length > 0) {
+        setTasks(res.data.tasks.map(normalizeTask));
+      }
+    } catch (err) {
+      console.warn('Tasks API fallback to local state:', err.message);
+    }
+  }, []);
+
+  // Load analytics from backend
+  const loadAnalyticsFromAPI = useCallback(async () => {
+    try {
+      const res = await analyticsAPI.getWeeklyStats();
+      if (res && res.data && res.data.weeklyStats) {
+        setWeeklyStats(res.data.weeklyStats);
+      }
+    } catch (err) {
+      console.warn('Analytics API fallback to local state:', err.message);
+    }
+  }, []);
+
+  // Auto-authenticate on mount if token is stored in localStorage
+  useEffect(() => {
+    const token = localStorage.getItem('taskify_token');
+    if (!token) return;
+
+    authAPI
+      .getMe()
+      .then((res) => {
+        if (res && res.data) {
+          setUser(res.data);
+          setIsLoggedIn(true);
+          setCurrentView('app');
+          loadTasksFromAPI();
+          loadAnalyticsFromAPI();
+        }
+      })
+      .catch((err) => {
+        console.warn('Token verification error:', err.message);
+      });
+
+    const handleUnauthorized = () => {
+      setIsLoggedIn(false);
+      setCurrentView('landing');
+    };
+    window.addEventListener('taskify:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('taskify:unauthorized', handleUnauthorized);
+  }, [loadTasksFromAPI, loadAnalyticsFromAPI]);
 
   // Auth triggers
   const handleOpenAuth = (mode = 'login') => {
@@ -35,26 +104,42 @@ export default function App() {
     setIsLoggedIn(true);
     setCurrentView('app');
     setAppSection('dashboard');
+    loadTasksFromAPI();
+    loadAnalyticsFromAPI();
   };
 
   const handleLogout = () => {
+    localStorage.removeItem('taskify_token');
     setIsLoggedIn(false);
     setCurrentView('landing');
   };
 
-  // Task actions
-  const handleToggleTask = (taskId) => {
+  // Task actions with SLA timestamp tracking & stage transitions
+  const handleToggleTask = async (taskId) => {
+    const now = new Date();
+    let updatedTask = null;
+
+    // Optimistic local update
     setTasks((prev) =>
       prev.map((t) => {
-        if (t.id === taskId) {
+        if (t.id === taskId || t._id === taskId) {
           const nextCompleted = !t.completed;
-          return { ...t, completed: nextCompleted };
+          const nextStage = nextCompleted ? 'done' : 'doing';
+          const startTime = t.startTime || new Date(now.getTime() - (t.estimatedMinutes || 30) * 60 * 1000).toISOString();
+          updatedTask = {
+            ...t,
+            completed: nextCompleted,
+            stage: nextStage,
+            startTime,
+            endTime: nextCompleted ? now.toISOString() : null
+          };
+          return updatedTask;
         }
         return t;
       })
     );
 
-    // Dynamically update today's (Thu) count in weeklyStats
+    // Dynamically update today's count in weeklyStats
     setWeeklyStats((prev) =>
       prev.map((stat) => {
         if (stat.day === 'Thu') {
@@ -66,14 +151,101 @@ export default function App() {
         return stat;
       })
     );
+
+    // Sync with backend API
+    try {
+      await tasksAPI.toggleTask(taskId);
+    } catch (err) {
+      console.warn('Backend toggleTask sync failed, using optimistic state:', err.message);
+    }
   };
 
-  const handleAddTask = (newTask) => {
-    setTasks([newTask, ...tasks]);
+  const handleUpdateTaskStage = async (taskId, newStage) => {
+    const now = new Date();
+    const isDone = newStage === 'done';
+    let targetTask = null;
+
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id === taskId || t._id === taskId) {
+          const startTime =
+            t.startTime ||
+            (isDone
+              ? new Date(now.getTime() - (t.estimatedMinutes || 30) * 60 * 1000).toISOString()
+              : newStage === 'doing'
+              ? now.toISOString()
+              : null);
+
+          targetTask = {
+            ...t,
+            stage: newStage,
+            completed: isDone,
+            startTime,
+            endTime: isDone ? now.toISOString() : null
+          };
+          return targetTask;
+        }
+        return t;
+      })
+    );
+
+    // Sync with backend API
+    try {
+      await tasksAPI.updateTask(taskId, {
+        stage: newStage,
+        completed: isDone,
+        ...(targetTask ? { startTime: targetTask.startTime, endTime: targetTask.endTime } : {})
+      });
+    } catch (err) {
+      console.warn('Backend updateTaskStage sync failed, using optimistic state:', err.message);
+    }
   };
 
-  const handleDeleteTask = (taskId) => {
-    setTasks(tasks.filter((t) => t.id !== taskId));
+  const handleAddTask = async (newTask) => {
+    const stage = newTask.stage || 'backlog';
+    const isDone = stage === 'done';
+    const now = new Date();
+    const tempId = `task-${Date.now()}`;
+
+    const taskWithTimestamps = normalizeTask({
+      ...newTask,
+      id: tempId,
+      _id: tempId,
+      stage,
+      completed: isDone,
+      startTime: isDone
+        ? new Date(now.getTime() - (newTask.estimatedMinutes || 30) * 60 * 1000).toISOString()
+        : stage === 'doing'
+        ? now.toISOString()
+        : null,
+      endTime: isDone ? now.toISOString() : null
+    });
+
+    // Optimistic local state update
+    setTasks((prev) => [taskWithTimestamps, ...prev]);
+
+    // Sync with backend API
+    try {
+      const res = await tasksAPI.createTask(newTask);
+      if (res && res.data && res.data._id) {
+        setTasks((prev) =>
+          prev.map((t) => (t.id === tempId ? normalizeTask(res.data) : t))
+        );
+      }
+    } catch (err) {
+      console.warn('Backend createTask sync failed, saved locally:', err.message);
+    }
+  };
+
+  const handleDeleteTask = async (taskId) => {
+    setTasks((prev) => prev.filter((t) => t.id !== taskId && t._id !== taskId));
+
+    // Sync with backend API
+    try {
+      await tasksAPI.deleteTask(taskId);
+    } catch (err) {
+      console.warn('Backend deleteTask sync failed, deleted locally:', err.message);
+    }
   };
 
   const activeTasksCount = tasks.filter((t) => !t.completed).length;
@@ -107,18 +279,16 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setIsMobileOpen(true)}
-                  className="p-1.5 rounded-lg text-[#8e8578] hover:text-[#121b28] hover:bg-[#f6f0e6]"
+                  className="p-2 rounded-lg text-[#121b28] hover:bg-[#f7f2ea]"
+                  aria-label="Open Navigation Menu"
                 >
-                  <span className="material-symbols-outlined text-2xl">menu</span>
+                  <span className="material-symbols-outlined text-xl">menu</span>
                 </button>
-                <span className="font-editorial text-base font-semibold uppercase tracking-wider text-[#121b28]">
-                  Taskify
-                </span>
+                <span className="font-editorial text-lg font-semibold text-[#121b28]">Taskify</span>
               </div>
-
-              <div className="w-7 h-7 rounded-full bg-[#121b2d] text-white flex items-center justify-center text-xs font-serif font-bold">
-                {user?.name ? user.name.charAt(0) : 'E'}
-              </div>
+              <span className="text-[11px] font-semibold text-[#c4965d] bg-[#f7f2ea] px-3 py-1 rounded-full border border-[#ded5c6]">
+                {activeTasksCount} Intentions
+              </span>
             </div>
 
             {/* Distinct App Sections */}
@@ -140,6 +310,7 @@ export default function App() {
                     key="tasks"
                     tasks={tasks}
                     onToggleTask={handleToggleTask}
+                    onUpdateTaskStage={handleUpdateTaskStage}
                     onAddTask={handleAddTask}
                     onDeleteTask={handleDeleteTask}
                   />
@@ -165,8 +336,8 @@ export default function App() {
       {/* Auth Modal for Sign Up & Log In */}
       <AuthModal
         isOpen={isAuthModalOpen}
-        onClose={() => setIsAuthModalOpen(false)}
         initialMode={authModalMode}
+        onClose={() => setIsAuthModalOpen(false)}
         onLoginSuccess={handleLoginSuccess}
       />
     </>

@@ -1,33 +1,77 @@
 import React, { useState } from 'react';
+import { authAPI } from '../services/api';
 
 export default function AuthModal({ isOpen, onClose, initialMode = 'login', onLoginSuccess }) {
   const [mode, setMode] = useState(initialMode);
   const [name, setName] = useState('Eleanor Vance');
   const [email, setEmail] = useState('eleanor@newlight.space');
-  const [password, setPassword] = useState('mindfulfocus');
+  const [password, setPassword] = useState('SecurePassword123!');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setIsSubmitting(true);
-    setTimeout(() => {
-      setIsSubmitting(false);
-      onLoginSuccess({
-        name: mode === 'signup' ? name : 'Eleanor Vance',
-        email: email
-      });
+    setErrorMessage('');
+
+    try {
+      let res;
+      if (mode === 'signup') {
+        res = await authAPI.signup({ name, email, password });
+      } else {
+        res = await authAPI.login({ email, password });
+      }
+
+      const { token, user } = res.data;
+      if (token) {
+        localStorage.setItem('taskify_token', token);
+      }
+      onLoginSuccess(user || { name: mode === 'signup' ? name : 'Eleanor Vance', email });
       onClose();
-    }, 500);
+    } catch (err) {
+      // If backend is running and gave error, show it; if connection fails, allow fallback demo login
+      console.warn('Auth API response/error:', err);
+      if (err.message && !err.message.includes('Failed to fetch')) {
+        setErrorMessage(err.message);
+      } else {
+        // Fallback demo login if offline/local
+        onLoginSuccess({
+          name: mode === 'signup' ? name : 'Eleanor Vance',
+          email: email
+        });
+        onClose();
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleQuickDemoLogin = () => {
-    onLoginSuccess({
-      name: 'Eleanor Vance',
-      email: 'eleanor@newlight.space'
-    });
-    onClose();
+  const handleQuickDemoLogin = async () => {
+    setIsSubmitting(true);
+    setErrorMessage('');
+    try {
+      const res = await authAPI.login({
+        email: 'eleanor@newlight.space',
+        password: 'SecurePassword123!'
+      });
+      const { token, user } = res.data;
+      if (token) {
+        localStorage.setItem('taskify_token', token);
+      }
+      onLoginSuccess(user || { name: 'Eleanor Vance', email: 'eleanor@newlight.space' });
+      onClose();
+    } catch (err) {
+      console.warn('Backend login fallback to mock:', err);
+      onLoginSuccess({
+        name: 'Eleanor Vance',
+        email: 'eleanor@newlight.space'
+      });
+      onClose();
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -68,7 +112,7 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login', onLo
         <div className="flex border-b border-[#ece2d4] bg-[#f7f2ea]/60">
           <button
             type="button"
-            onClick={() => setMode('login')}
+            onClick={() => { setMode('login'); setErrorMessage(''); }}
             className={`flex-1 py-3 text-xs font-semibold tracking-wider uppercase transition-all cursor-pointer ${
               mode === 'login'
                 ? 'text-[#121b28] border-b-2 border-[#121b28] bg-[#fcfaf6]'
@@ -79,7 +123,7 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login', onLo
           </button>
           <button
             type="button"
-            onClick={() => setMode('signup')}
+            onClick={() => { setMode('signup'); setErrorMessage(''); }}
             className={`flex-1 py-3 text-xs font-semibold tracking-wider uppercase transition-all cursor-pointer ${
               mode === 'signup'
                 ? 'text-[#121b28] border-b-2 border-[#121b28] bg-[#fcfaf6]'
@@ -103,10 +147,19 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login', onLo
             </p>
           </div>
 
+          {/* Error Message */}
+          {errorMessage && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs flex items-center gap-2">
+              <span className="material-symbols-outlined text-sm">error</span>
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
           {/* Quick Demo Access Button */}
           <button
             type="button"
             onClick={handleQuickDemoLogin}
+            disabled={isSubmitting}
             className="w-full py-2.5 px-4 rounded-full bg-[#f6f0e6] hover:bg-[#ede4d4] border border-[#d8cdbd] text-[#121b28] text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer shadow-2xs"
           >
             <span className="material-symbols-outlined text-[#c4965d] text-base">sparkles</span>
